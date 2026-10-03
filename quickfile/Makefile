@@ -30,7 +30,7 @@ define Package/quickfile
 	CATEGORY:=Network
 	SUBMENU:=Web Servers/Proxies
 	TITLE:=Quick File Manager
-	DEPENDS:=$(RUST_ARCH_DEPENDS) +liblzma
+	DEPENDS:=$(RUST_ARCH_DEPENDS) +liblzma +nginx
 	URL:=https://git.cooluc.com/sbwml/quickfile
 endef
 
@@ -46,9 +46,18 @@ define Package/quickfile/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/bin/quickfile $(1)/usr/bin/
 
-	$(INSTALL_DIR) $(1)/etc/init.d $(1)/etc/nginx/conf.d
+	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(CURDIR)/files/quickfile.init $(1)/etc/init.d/quickfile
-	$(INSTALL_CONF) $(CURDIR)/files/quickfile.locations $(1)/etc/nginx/conf.d/quickfile.locations
+
+	# 独立 server 配置：只监听 8080，不碰 uHTTPd
+	$(INSTALL_DIR) $(1)/etc/nginx/conf.d
+	$(INSTALL_CONF) $(CURDIR)/files/nginx/conf.d/quickfile-server.conf \
+		$(1)/etc/nginx/conf.d/quickfile-server.conf
+
+	# 路由规则放到独立目录，只有我们自己的 server 引用
+	$(INSTALL_DIR) $(1)/etc/nginx/quickfile-locations
+	$(INSTALL_CONF) $(CURDIR)/files/quickfile.locations \
+		$(1)/etc/nginx/quickfile-locations/quickfile.locations
 endef
 
 $(eval $(call RustBinPackage,quickfile))
