@@ -95,8 +95,6 @@ jobs:
 
           # 拷贝安装脚本（去掉 .template 后缀）
           cp -v scripts/install.sh.template   "bundle/${PKG_DIR_NAME}/install.sh"
-          cp -v scripts/uninstall.sh.template "bundle/${PKG_DIR_NAME}/uninstall.sh"
-          chmod +x "bundle/${PKG_DIR_NAME}/install.sh" "bundle/${PKG_DIR_NAME}/uninstall.sh"
 
           # 打 tar.gz
           tar -czf "work/${PKG_DIR_NAME}.tar.gz" -C bundle "${PKG_DIR_NAME}"
@@ -197,7 +195,16 @@ jobs:
             echo '```'
             echo ""
             echo "脚本会自动安装 nginx、安装 quickfile、配置 8080 端口。"
-            echo "卸载：解压后可执行 \`sh uninstall.sh\`，或直接 \`opkg remove quickfile\` / \`apk del quickfile\`。"
+            echo ""
+            echo "**卸载方法**："
+            echo ""
+            echo '```bash'
+            echo "# opkg 系统"
+            echo "opkg remove luci-app-quickfile quickfile luci-i18n-quickfile-zh-cn"
+            echo ""
+            echo "# apk 系统"
+            echo "apk del luci-app-quickfile quickfile luci-i18n-quickfile-zh-cn"
+            echo '```'
             echo ""
             echo "| 架构 | SDK 24.10 | SDK 25.12 |"
             echo "| :--- | :--- | :--- |"
