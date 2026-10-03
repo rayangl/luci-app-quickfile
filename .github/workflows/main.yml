@@ -24,7 +24,6 @@ jobs:
           - x86_64
         sdk:
           - "25.12"
-          - "24.10"
 
     steps:
       - uses: actions/checkout@v4
@@ -215,14 +214,12 @@ jobs:
             echo "apk del luci-app-quickfile quickfile luci-i18n-quickfile-zh-cn"
             echo '```'
             echo ""
-            echo "| 架构 | SDK 24.10 | SDK 25.12 |"
-            echo "| :--- | :--- | :--- |"
+            echo "| 架构 | SDK 25.12 |"
+            echo "| :--- | :--- |"
             for arch in $ARCHS; do
-              b1=$(ls dist/24.10_quickfile_*_${arch}.run 2>/dev/null | head -1)
               b2=$(ls dist/25.12_quickfile_*_${arch}.run 2>/dev/null | head -1)
-              l1=$([ -n "$b1" ] && echo "[下载](${BASE}/$(basename "$b1"))" || echo "—")
               l2=$([ -n "$b2" ] && echo "[下载](${BASE}/$(basename "$b2"))" || echo "—")
-              echo "| \`${arch}\` | ${l1} | ${l2} |"
+              echo "| \`${arch}\` | ${l2} |"
             done
             echo ""
             echo "---"
