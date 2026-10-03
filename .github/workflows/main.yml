@@ -2,9 +2,14 @@ name: Build quickfile & Release
 
 on:
   workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    inputs:
+      prerelease:
+        description: 'Mark as prerelease'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   build:
@@ -22,7 +27,18 @@ jobs:
           - "24.10"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+
+      # ⚡ 缓存：dl + host 工具链，key 基于 arch/sdk/Cargo.lock
+      - name: Cache OpenWrt SDK Build Artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/dl
+            openwrt/staging_dir/host
+          key: ow-sdk-${{ matrix.arch }}-sdk${{ matrix.sdk }}-${{ hashFiles('quickfile/Cargo.lock') }}
+          restore-keys: |
+            ow-sdk-${{ matrix.arch }}-sdk${{ matrix.sdk }}-
 
       - name: Build packages
         uses: openwrt/gh-action-sdk@main
@@ -38,22 +54,22 @@ jobs:
           ARCH="${{ matrix.arch }}"
           mkdir -p dist/release dist/feed
 
-          # IPK：release 加安全文件名，feed 保留原名
+          # IPK：release 加架构后缀（避免多架构同名覆盖），feed 保留原名
           for f in bin/packages/${ARCH}/quickfile/*.ipk; do
             [ -f "$f" ] || continue
-            [[ "$(basename $f)" == Packages* ]] && continue
+            [[ "$(basename "$f")" == Packages* ]] && continue
             base=$(basename "$f" .ipk)
-            safe="${base//\~/.}"
-            cp -v "$f" "dist/release/${safe}.ipk"
+            safe="${base//~/.}"
+            cp -v "$f" "dist/release/${safe}-${ARCH}.ipk"
             cp -v "$f" dist/feed/
           done
 
           # APK：release 加架构后缀，feed 保留原名
           for f in bin/packages/${ARCH}/quickfile/*.apk; do
             [ -f "$f" ] || continue
-            [[ "$(basename $f)" == Packages* ]] && continue
+            [[ "$(basename "$f")" == Packages* ]] && continue
             base=$(basename "$f" .apk)
-            safe="${base//\~/.}"
+            safe="${base//~/.}"
             cp -v "$f" "dist/release/${safe}-${ARCH}.apk"
             cp -v "$f" "dist/feed/${safe}.apk"
           done
@@ -65,7 +81,7 @@ jobs:
           done
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: packages-sdk${{ matrix.sdk }}-${{ matrix.arch }}
           path: dist/
@@ -77,14 +93,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: release-global
+      cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Download artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v4
         with:
           path: all-artifacts
           pattern: packages-*
@@ -94,7 +113,7 @@ jobs:
           mkdir -p dist
           find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
 
-      - name: Determine tag
+      - name: Determine tag & prerelease
         id: meta
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
@@ -112,7 +131,7 @@ jobs:
         run: |
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
           ARCHS="aarch64_cortex-a53 aarch64_generic x86_64"
-          PREVIOUS_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -v "^${TAG}$" | head -1 || true)"
+          PREVIOUS_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -vxF "${TAG}" | head -1 || true)"
 
           if [ -n "$PREVIOUS_TAG" ]; then
             RANGE="${PREVIOUS_TAG}..HEAD"
@@ -130,6 +149,7 @@ jobs:
                 RS = "\036"
                 FS = "\037"
                 count = 0
+                IGNORECASE = 1
               }
               {
                 subject = $1
@@ -143,7 +163,7 @@ jobs:
                   sub(/^[a-z]+([(][^)]+[)])?!?:[[:space:]]*/, "", item)
                   issue = ""
                   text = subject "\n" body
-                  if (match(text, /(([Ff]ixes|[Cc]loses|[Rr]esolves|[Rr]efs)[[:space:]]+#[0-9]+)/)) {
+                  if (match(text, /((Fixes|Closes|Resolves|Refs)[[:space:]]+#[0-9]+)/)) {
                     issue = " (" substr(text, RSTART, RLENGTH) ")"
                   } else if (match(text, /#[0-9]+/)) {
                     issue = " (" substr(text, RSTART, RLENGTH) ")"
@@ -165,20 +185,23 @@ jobs:
           }
 
           {
+            write_section "✨ Features" "^feat"
+            write_section "🐛 Bug Fixes" "^fix"
+            write_section "🔧 Other" "^(chore|docs|refactor|perf|test|build|ci)"
+
             echo "## 📦 SDK 24.10 · (IPK)"
             echo ""
             echo "| 架构 | quickfile | luci-app-quickfile | luci-i18n-quickfile-zh-cn |"
             echo "| :--- | :--- | :--- | :--- |"
-            luci_ipk=$(ls dist/luci-app-quickfile_*_all.ipk 2>/dev/null | head -1)
-            luci_ipk_link=$( [ -n "$luci_ipk" ] && echo "[$(basename $luci_ipk)](${BASE}/$(basename $luci_ipk))" || echo "—" )
-            # 这里补上 i18n 中文语言包
-            luci_i18n_ipk=$(ls dist/luci-i18n-quickfile-zh-cn_*_all.ipk 2>/dev/null | head -1)
-            luci_i18n_link=$( [ -n "$luci_i18n_ipk" ] && echo "[$(basename $luci_i18n_ipk)](${BASE}/$(basename $luci_i18n_ipk))" || echo "—" )
+
+            luci_ipk=$(ls dist/luci-app-quickfile_*.ipk 2>/dev/null | head -1)
+            luci_ipk_link=$([ -n "$luci_ipk" ] && echo "[$(basename "$luci_ipk")](${BASE}/$(basename "$luci_ipk"))" || echo "—")
+            luci_i18n_ipk=$(ls dist/luci-i18n-quickfile-zh-cn_*.ipk 2>/dev/null | head -1)
+            luci_i18n_link=$([ -n "$luci_i18n_ipk" ] && echo "[$(basename "$luci_i18n_ipk")](${BASE}/$(basename "$luci_i18n_ipk"))" || echo "—")
 
             for arch in $ARCHS; do
-              f=$(ls dist/quickfile_*_${arch}.ipk 2>/dev/null | head -1)
-              link=$( [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "—" )
-              # 输出行最后增加 i18n 列
+              f=$(ls dist/quickfile_*-${arch}.ipk 2>/dev/null | head -1)
+              link=$([ -n "$f" ] && echo "[$(basename "$f")](${BASE}/$(basename "$f"))" || echo "—")
               echo "| \`${arch}\` | ${link} | ${luci_ipk_link} | ${luci_i18n_link} |"
             done
 
@@ -187,13 +210,14 @@ jobs:
             echo ""
             echo "| 架构 | quickfile | luci-app-quickfile | luci-i18n-quickfile-zh-cn |"
             echo "| :--- | :--- | :--- | :--- |"
+
             for arch in $ARCHS; do
               f_core=$(ls dist/quickfile-*-${arch}.apk 2>/dev/null | head -1)
               f_luci=$(ls dist/luci-app-quickfile-*-${arch}.apk 2>/dev/null | head -1)
               f_i18n=$(ls dist/luci-i18n-quickfile-zh-cn-*-${arch}.apk 2>/dev/null | head -1)
-              link_core=$( [ -n "$f_core" ] && echo "[$(basename $f_core)](${BASE}/$(basename $f_core))" || echo "—" )
-              link_luci=$( [ -n "$f_luci" ] && echo "[$(basename $f_luci)](${BASE}/$(basename $f_luci))" || echo "—" )
-              link_i18n=$( [ -n "$f_i18n" ] && echo "[$(basename $f_i18n)](${BASE}/$(basename $f_i18n))" || echo "—" )
+              link_core=$([ -n "$f_core" ] && echo "[$(basename "$f_core")](${BASE}/$(basename "$f_core"))" || echo "—")
+              link_luci=$([ -n "$f_luci" ] && echo "[$(basename "$f_luci")](${BASE}/$(basename "$f_luci"))" || echo "—")
+              link_i18n=$([ -n "$f_i18n" ] && echo "[$(basename "$f_i18n")](${BASE}/$(basename "$f_i18n"))" || echo "—")
               echo "| \`${arch}\` | ${link_core} | ${link_luci} | ${link_i18n} |"
             done
           } > release_notes.md
@@ -201,14 +225,13 @@ jobs:
           cat release_notes.md
 
       - name: Replace Existing Manual Release
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.meta.outputs.tag }}
-          REPO: ${{ github.repository }}
         run: |
-          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            gh release delete "$TAG" -R "$REPO" --yes --cleanup-tag
+          if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release delete "$TAG" -R "${{ github.repository }}" --yes --cleanup-tag
           fi
 
       - name: Publish Release
@@ -217,9 +240,7 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: Release ${{ steps.meta.outputs.tag }}
           body_path: release_notes.md
-          prerelease: ${{ steps.meta.outputs.prerelease }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           files: dist/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  
