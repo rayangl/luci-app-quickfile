@@ -3,7 +3,7 @@
 include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=LuCI File Manager module
-LUCI_DEPENDS:=+luci-nginx +quickfile
+LUCI_DEPENDS:=+quickfile
 
 PKG_LICENSE:=Apache-2.0
 PKG_VERSION:=1.0.0
