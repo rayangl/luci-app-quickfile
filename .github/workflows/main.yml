@@ -35,7 +35,7 @@ jobs:
             openwrt/dl
             openwrt/staging_dir/host
             openwrt/staging_dir/toolchain-*
-          key: ow-sdk-${{ matrix.arch }}-sdk${{ matrix.sdk }}-${{ hashFiles('quickfile/Cargo.lock') }}
+          key: ow-sdk-${{ matrix.arch }}-sdk${{ matrix.sdk }}-${{ hashFiles('quickfile/Makefile') }}
           restore-keys: |
             ow-sdk-${{ matrix.arch }}-sdk${{ matrix.sdk }}-
 
