@@ -1,0 +1,225 @@
+name: Build quickfile & Release
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: ${{ matrix.arch }} · SDK ${{ matrix.sdk }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - aarch64_cortex-a53
+          - aarch64_generic
+          - x86_64
+        sdk:
+          - "25.12"
+          - "24.10"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build packages
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}-openwrt-${{ matrix.sdk }}
+          FEEDNAME: quickfile
+          PACKAGES: quickfile luci-app-quickfile
+          NO_REFRESH_CHECK: true
+          INDEX: 1
+
+      - name: Collect packages
+        run: |
+          ARCH="${{ matrix.arch }}"
+          mkdir -p dist/release dist/feed
+
+          # IPK：release 加安全文件名，feed 保留原名
+          for f in bin/packages/${ARCH}/quickfile/*.ipk; do
+            [ -f "$f" ] || continue
+            [[ "$(basename $f)" == Packages* ]] && continue
+            base=$(basename "$f" .ipk)
+            safe="${base//\~/.}"
+            cp -v "$f" "dist/release/${safe}.ipk"
+            cp -v "$f" dist/feed/
+          done
+
+          # APK：release 加架构后缀，feed 保留原名
+          for f in bin/packages/${ARCH}/quickfile/*.apk; do
+            [ -f "$f" ] || continue
+            [[ "$(basename $f)" == Packages* ]] && continue
+            base=$(basename "$f" .apk)
+            safe="${base//\~/.}"
+            cp -v "$f" "dist/release/${safe}-${ARCH}.apk"
+            cp -v "$f" "dist/feed/${safe}.apk"
+          done
+
+          # Feed 索引（仅 feed）
+          for f in bin/packages/${ARCH}/quickfile/Packages* bin/packages/${ARCH}/quickfile/APKINDEX*; do
+            [ -f "$f" ] || continue
+            cp -v "$f" dist/feed/
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: packages-sdk${{ matrix.sdk }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: ignore
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: all-artifacts
+          pattern: packages-*
+
+      - name: Flatten release files
+        run: |
+          mkdir -p dist
+          find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
+
+      - name: Determine tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          else
+            echo "tag=v$(date -u +%Y.%m.%d)" >> $GITHUB_OUTPUT
+            echo "prerelease=${{ github.event.inputs.prerelease }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Release Notes
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+          ARCHS="aarch64_cortex-a53 aarch64_generic x86_64"
+          PREVIOUS_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -v "^${TAG}$" | head -1 || true)"
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            RANGE="${PREVIOUS_TAG}..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+
+          git log --format='%s%x1f%b%x1e' "$RANGE" > commits.raw
+
+          write_section() {
+            title="$1"
+            pattern="$2"
+            awk -v title="$title" -v pattern="$pattern" '
+              BEGIN {
+                RS = "\036"
+                FS = "\037"
+                count = 0
+              }
+              {
+                subject = $1
+                body = $2
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", subject)
+                if (subject == "" || subject ~ /^Merge /) {
+                  next
+                }
+                if (subject ~ pattern) {
+                  item = subject
+                  sub(/^[a-z]+([(][^)]+[)])?!?:[[:space:]]*/, "", item)
+                  issue = ""
+                  text = subject "\n" body
+                  if (match(text, /(([Ff]ixes|[Cc]loses|[Rr]esolves|[Rr]efs)[[:space:]]+#[0-9]+)/)) {
+                    issue = " (" substr(text, RSTART, RLENGTH) ")"
+                  } else if (match(text, /#[0-9]+/)) {
+                    issue = " (" substr(text, RSTART, RLENGTH) ")"
+                  }
+                  lines[++count] = "- " item issue
+                }
+              }
+              END {
+                if (count > 0) {
+                  print "## " title
+                  print ""
+                  for (i = 1; i <= count; i++) {
+                    print lines[i]
+                  }
+                  print ""
+                }
+              }
+            ' commits.raw
+          }
+
+          {
+            echo "## 📦 SDK 24.10 · (IPK)"
+            echo ""
+            echo "| 架构 | quickfile | luci-app-quickfile | luci-i18n-quickfile-zh-cn |"
+            echo "| :--- | :--- | :--- | :--- |"
+            luci_ipk=$(ls dist/luci-app-quickfile_*_all.ipk 2>/dev/null | head -1)
+            luci_ipk_link=$( [ -n "$luci_ipk" ] && echo "[$(basename $luci_ipk)](${BASE}/$(basename $luci_ipk))" || echo "—" )
+            # 这里补上 i18n 中文语言包
+            luci_i18n_ipk=$(ls dist/luci-i18n-quickfile-zh-cn_*_all.ipk 2>/dev/null | head -1)
+            luci_i18n_link=$( [ -n "$luci_i18n_ipk" ] && echo "[$(basename $luci_i18n_ipk)](${BASE}/$(basename $luci_i18n_ipk))" || echo "—" )
+
+            for arch in $ARCHS; do
+              f=$(ls dist/quickfile_*_${arch}.ipk 2>/dev/null | head -1)
+              link=$( [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "—" )
+              # 输出行最后增加 i18n 列
+              echo "| \`${arch}\` | ${link} | ${luci_ipk_link} | ${luci_i18n_link} |"
+            done
+
+            echo ""
+            echo "## 📦 SDK 25.12 · (APK)"
+            echo ""
+            echo "| 架构 | quickfile | luci-app-quickfile | luci-i18n-quickfile-zh-cn |"
+            echo "| :--- | :--- | :--- | :--- |"
+            for arch in $ARCHS; do
+              f_core=$(ls dist/quickfile-*-${arch}.apk 2>/dev/null | head -1)
+              f_luci=$(ls dist/luci-app-quickfile-*-${arch}.apk 2>/dev/null | head -1)
+              f_i18n=$(ls dist/luci-i18n-quickfile-zh-cn-*-${arch}.apk 2>/dev/null | head -1)
+              link_core=$( [ -n "$f_core" ] && echo "[$(basename $f_core)](${BASE}/$(basename $f_core))" || echo "—" )
+              link_luci=$( [ -n "$f_luci" ] && echo "[$(basename $f_luci)](${BASE}/$(basename $f_luci))" || echo "—" )
+              link_i18n=$( [ -n "$f_i18n" ] && echo "[$(basename $f_i18n)](${BASE}/$(basename $f_i18n))" || echo "—" )
+              echo "| \`${arch}\` | ${link_core} | ${link_luci} | ${link_i18n} |"
+            done
+          } > release_notes.md
+
+          cat release_notes.md
+
+      - name: Replace Existing Manual Release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release delete "$TAG" -R "$REPO" --yes --cleanup-tag
+          fi
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Release ${{ steps.meta.outputs.tag }}
+          body_path: release_notes.md
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          files: dist/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  
