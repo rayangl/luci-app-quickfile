@@ -48,74 +48,72 @@ jobs:
           NO_REFRESH_CHECK: true
           INDEX: 1
 
-      - name: Collect packages
+      - name: Collect raw packages (not published)
         run: |
           ARCH="${{ matrix.arch }}"
-          mkdir -p dist/release
+          mkdir -p work/raw
 
-          # IPK
-          for f in bin/packages/${ARCH}/quickfile/*.ipk; do
+          for f in bin/packages/${ARCH}/quickfile/*.ipk bin/packages/${ARCH}/quickfile/*.apk; do
             [ -f "$f" ] || continue
             [[ "$(basename "$f")" == Packages* ]] && continue
-            base=$(basename "$f" .ipk)
+            base=$(basename "$f")
             safe="${base//~/.}"
-            cp -v "$f" "dist/release/${safe}-${ARCH}.ipk"
+            cp -v "$f" "work/raw/${safe}"
           done
 
-          # APK
-          for f in bin/packages/${ARCH}/quickfile/*.apk; do
-            [ -f "$f" ] || continue
-            [[ "$(basename "$f")" == Packages* ]] && continue
-            base=$(basename "$f" .apk)
-            safe="${base//~/.}"
-            cp -v "$f" "dist/release/${safe}-${ARCH}.apk"
-          done
-
-      - name: Build per-arch installer tarball
+      - name: Build per-arch .run installer
         run: |
           set -e
           ARCH="${{ matrix.arch }}"
           SDK="${{ matrix.sdk }}"
 
-          QF=$(ls dist/release/quickfile-*-${ARCH}.apk 2>/dev/null | head -1 || true)
-          [ -z "$QF" ] && QF=$(ls dist/release/quickfile_*-${ARCH}.ipk 2>/dev/null | head -1 || true)
+          # 找 quickfile 主包（APK 或 IPK）
+          QF=$(ls work/raw/quickfile-*-${ARCH}.apk 2>/dev/null | head -1 || true)
+          [ -z "$QF" ] && QF=$(ls work/raw/quickfile_*-${ARCH}.ipk 2>/dev/null | head -1 || true)
           if [ -z "$QF" ]; then
-            echo "No quickfile package found, skip tarball"
+            echo "No quickfile package found, skip .run"
             exit 0
           fi
 
           VER=$(basename "$QF" | sed -E 's/^quickfile[-_]([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
           echo "Detected version: $VER"
 
-          DIRNAME="${SDK}_quickfile_${VER}_${ARCH}"
-          rm -rf "bundle/${DIRNAME}"
-          mkdir -p "bundle/${DIRNAME}"
+          PKG_DIR_NAME="${SDK}_quickfile_${VER}_${ARCH}"
+          RUN_NAME="${PKG_DIR_NAME}.run"
 
-          # 拷贝该架构的包
-          cp -v dist/release/quickfile-*-${ARCH}.apk   "bundle/${DIRNAME}/" 2>/dev/null || true
-          cp -v dist/release/quickfile_*-${ARCH}.ipk   "bundle/${DIRNAME}/" 2>/dev/null || true
-          cp -v dist/release/luci-app-quickfile-*.apk  "bundle/${DIRNAME}/" 2>/dev/null || true
-          cp -v dist/release/luci-app-quickfile_*.ipk  "bundle/${DIRNAME}/" 2>/dev/null || true
-          cp -v dist/release/luci-i18n-quickfile-zh-cn-*.apk "bundle/${DIRNAME}/" 2>/dev/null || true
-          cp -v dist/release/luci-i18n-quickfile-zh-cn_*.ipk "bundle/${DIRNAME}/" 2>/dev/null || true
+          # 准备内容目录
+          rm -rf "bundle/${PKG_DIR_NAME}"
+          mkdir -p "bundle/${PKG_DIR_NAME}"
 
-          # 从仓库复制脚本模板（去掉 .template 后缀）
-          cp -v scripts/install.sh.template   "bundle/${DIRNAME}/install.sh"
-          cp -v scripts/uninstall.sh.template "bundle/${DIRNAME}/uninstall.sh"
-          chmod +x "bundle/${DIRNAME}/install.sh" "bundle/${DIRNAME}/uninstall.sh"
+          # 拷贝包
+          cp -v work/raw/quickfile-*-${ARCH}.apk   "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
+          cp -v work/raw/quickfile_*-${ARCH}.ipk   "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
+          cp -v work/raw/luci-app-quickfile-*.apk  "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
+          cp -v work/raw/luci-app-quickfile_*.ipk  "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
+          cp -v work/raw/luci-i18n-quickfile-zh-cn-*.apk "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
+          cp -v work/raw/luci-i18n-quickfile-zh-cn_*.ipk "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
 
-          mkdir -p dist/bundles
-          tar -czf "dist/bundles/${DIRNAME}.tar.gz" -C bundle "${DIRNAME}"
-          echo "Built: dist/bundles/${DIRNAME}.tar.gz"
-          tar -tzf "dist/bundles/${DIRNAME}.tar.gz"
+          # 拷贝安装脚本（去掉 .template 后缀）
+          cp -v scripts/install.sh.template   "bundle/${PKG_DIR_NAME}/install.sh"
+          cp -v scripts/uninstall.sh.template "bundle/${PKG_DIR_NAME}/uninstall.sh"
+          chmod +x "bundle/${PKG_DIR_NAME}/install.sh" "bundle/${PKG_DIR_NAME}/uninstall.sh"
+
+          # 打 tar.gz
+          tar -czf "work/${PKG_DIR_NAME}.tar.gz" -C bundle "${PKG_DIR_NAME}"
+
+          # 拼接 shell 头 + tar.gz 尾 → .run
+          mkdir -p dist/run
+          cat scripts/run-header.sh.template "work/${PKG_DIR_NAME}.tar.gz" > "dist/run/${RUN_NAME}"
+          chmod +x "dist/run/${RUN_NAME}"
+
+          echo "Built: dist/run/${RUN_NAME}"
+          ls -lh "dist/run/${RUN_NAME}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: packages-sdk${{ matrix.sdk }}-${{ matrix.arch }}
-          path: |
-            dist/release/
-            dist/bundles/
+          name: run-sdk${{ matrix.sdk }}-${{ matrix.arch }}
+          path: dist/run/
           if-no-files-found: ignore
 
   release:
@@ -136,14 +134,13 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-artifacts
-          pattern: packages-*
+          path: all-runs
+          pattern: run-*
 
-      - name: Flatten release files
+      - name: Flatten run files
         run: |
           mkdir -p dist
-          find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
-          find all-artifacts -path "*/bundles/*" -type f -exec cp -v {} dist/ \;
+          find all-runs -type f -name "*.run" -exec cp -v {} dist/ \;
 
       - name: Determine tag & prerelease
         id: meta
@@ -190,73 +187,36 @@ jobs:
             write_section "🐛 Bug Fixes" "^fix"
             write_section "🔧 Other" "^(chore|docs|refactor|perf|test|build|ci)"
 
-            # 一键安装包
-            echo "## 📦 一键安装包（推荐）"
+            echo "## 📦 一键安装包 (.run)"
             echo ""
-            echo "解压后执行 \`sh install.sh\` 即可，自动安装 nginx、配置 8080 端口。"
-            echo "卸载执行 \`sh uninstall.sh\`，不会影响 uHTTPd / LuCI 后台。"
+            echo "**使用方法**：下载对应架构的 \`.run\` 文件，赋予执行权限后直接运行："
+            echo ""
+            echo '```bash'
+            echo "chmod +x <file>.run"
+            echo "./<file>.run"
+            echo '```'
+            echo ""
+            echo "脚本会自动安装 nginx、安装 quickfile、配置 8080 端口。"
+            echo "卸载：解压后可执行 \`sh uninstall.sh\`，或直接 \`opkg remove quickfile\` / \`apk del quickfile\`。"
             echo ""
             echo "| 架构 | SDK 24.10 | SDK 25.12 |"
             echo "| :--- | :--- | :--- |"
             for arch in $ARCHS; do
-              b1=$(ls dist/24.10_quickfile_*_${arch}.tar.gz 2>/dev/null | head -1)
-              b2=$(ls dist/25.12_quickfile_*_${arch}.tar.gz 2>/dev/null | head -1)
+              b1=$(ls dist/24.10_quickfile_*_${arch}.run 2>/dev/null | head -1)
+              b2=$(ls dist/25.12_quickfile_*_${arch}.run 2>/dev/null | head -1)
               l1=$([ -n "$b1" ] && echo "[下载](${BASE}/$(basename "$b1"))" || echo "—")
               l2=$([ -n "$b2" ] && echo "[下载](${BASE}/$(basename "$b2"))" || echo "—")
               echo "| \`${arch}\` | ${l1} | ${l2} |"
             done
             echo ""
-
-            # SDK 24.10 IPK
-            echo "## 📦 SDK 24.10 · (IPK)"
-            echo ""
-            echo "### 主程序（按架构）"
-            echo ""
-            echo "| 架构 | quickfile |"
-            echo "| :--- | :--- |"
-            for arch in $ARCHS; do
-              f=$(ls dist/quickfile_*-${arch}.ipk 2>/dev/null | head -1)
-              link=$([ -n "$f" ] && echo "[$(basename "$f")](${BASE}/$(basename "$f"))" || echo "—")
-              echo "| \`${arch}\` | ${link} |"
-            done
-            echo ""
-            echo "### LuCI 前端与语言包（all 架构，通用）"
-            echo ""
-            luci_ipk=$(ls dist/luci-app-quickfile_*.ipk 2>/dev/null | head -1)
-            [ -n "$luci_ipk" ] && echo "- [$(basename "$luci_ipk")](${BASE}/$(basename "$luci_ipk"))"
-            i18n_ipk=$(ls dist/luci-i18n-quickfile-zh-cn_*.ipk 2>/dev/null | head -1)
-            [ -n "$i18n_ipk" ] && echo "- [$(basename "$i18n_ipk")](${BASE}/$(basename "$i18n_ipk"))"
-            echo ""
-
-            # SDK 25.12 APK
-            echo "## 📦 SDK 25.12 · (APK)"
-            echo ""
-            echo "### 主程序（按架构）"
-            echo ""
-            echo "| 架构 | quickfile |"
-            echo "| :--- | :--- |"
-            for arch in $ARCHS; do
-              f=$(ls dist/quickfile-*-${arch}.apk 2>/dev/null | head -1)
-              link=$([ -n "$f" ] && echo "[$(basename "$f")](${BASE}/$(basename "$f"))" || echo "—")
-              echo "| \`${arch}\` | ${link} |"
-            done
-            echo ""
-            echo "### LuCI 前端与语言包（按架构）"
-            echo ""
-            for arch in $ARCHS; do
-              fl=$(ls dist/luci-app-quickfile-*-${arch}.apk 2>/dev/null | head -1)
-              f_i18n=$(ls dist/luci-i18n-quickfile-zh-cn-*-${arch}.apk 2>/dev/null | head -1)
-              ll=$([ -n "$fl" ] && echo "[$(basename "$fl")](${BASE}/$(basename "$fl"))" || echo "—")
-              li=$([ -n "$f_i18n" ] && echo "[$(basename "$f_i18n")](${BASE}/$(basename "$f_i18n"))" || echo "—")
-              echo "- \`${arch}\`: luci=${ll}  i18n=${li}"
-            done
-            echo ""
-
             echo "---"
             echo ""
             echo "> **安全提示**：当前 OpenWrt 源的 nginx 为 1.26.3，"
             echo "> 受 CVE-2026-42945 相似风险影响。**请勿将 8080 端口暴露到公网**，"
             echo "> 建议仅局域网使用。"
+            echo ""
+            echo "> **Web 后台不受影响**：本安装包只使用 nginx 的 8080 端口，"
+            echo "> 不会改动 uHTTPd / LuCI 的 80 端口。"
           } > release_notes.md
 
           cat release_notes.md
