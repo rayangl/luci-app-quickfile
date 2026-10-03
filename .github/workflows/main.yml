@@ -48,12 +48,22 @@ jobs:
           NO_REFRESH_CHECK: true
           INDEX: 1
 
-      - name: Collect raw packages (not published)
+      - name: Collect raw packages
         run: |
           ARCH="${{ matrix.arch }}"
           mkdir -p work/raw
 
-          for f in bin/packages/${ARCH}/quickfile/*.ipk bin/packages/${ARCH}/quickfile/*.apk; do
+          # IPK
+          for f in bin/packages/${ARCH}/quickfile/*.ipk; do
+            [ -f "$f" ] || continue
+            [[ "$(basename "$f")" == Packages* ]] && continue
+            base=$(basename "$f")
+            safe="${base//~/.}"
+            cp -v "$f" "work/raw/${safe}"
+          done
+
+          # APK
+          for f in bin/packages/${ARCH}/quickfile/*.apk; do
             [ -f "$f" ] || continue
             [[ "$(basename "$f")" == Packages* ]] && continue
             base=$(basename "$f")
@@ -67,7 +77,6 @@ jobs:
           ARCH="${{ matrix.arch }}"
           SDK="${{ matrix.sdk }}"
 
-          # 找 quickfile 主包（APK 或 IPK）
           QF=$(ls work/raw/quickfile-*-${ARCH}.apk 2>/dev/null | head -1 || true)
           [ -z "$QF" ] && QF=$(ls work/raw/quickfile_*-${ARCH}.ipk 2>/dev/null | head -1 || true)
           if [ -z "$QF" ]; then
@@ -81,11 +90,10 @@ jobs:
           PKG_DIR_NAME="${SDK}_quickfile_${VER}_${ARCH}"
           RUN_NAME="${PKG_DIR_NAME}.run"
 
-          # 准备内容目录
           rm -rf "bundle/${PKG_DIR_NAME}"
           mkdir -p "bundle/${PKG_DIR_NAME}"
 
-          # 拷贝包
+          # 拷贝该架构的包
           cp -v work/raw/quickfile-*-${ARCH}.apk   "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
           cp -v work/raw/quickfile_*-${ARCH}.ipk   "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
           cp -v work/raw/luci-app-quickfile-*.apk  "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
@@ -93,13 +101,14 @@ jobs:
           cp -v work/raw/luci-i18n-quickfile-zh-cn-*.apk "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
           cp -v work/raw/luci-i18n-quickfile-zh-cn_*.ipk "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
 
-          # 拷贝安装脚本（去掉 .template 后缀）
-          cp -v scripts/install.sh.template   "bundle/${PKG_DIR_NAME}/install.sh"
+          # 只拷 install.sh（不再拷 uninstall.sh）
+          cp -v scripts/install.sh.template "bundle/${PKG_DIR_NAME}/install.sh"
+          chmod +x "bundle/${PKG_DIR_NAME}/install.sh"
 
-          # 打 tar.gz
+          # 打 tar.gz（中间产物）
           tar -czf "work/${PKG_DIR_NAME}.tar.gz" -C bundle "${PKG_DIR_NAME}"
 
-          # 拼接 shell 头 + tar.gz 尾 → .run
+          # 拼接 shell 头 + tar.gz → .run
           mkdir -p dist/run
           cat scripts/run-header.sh.template "work/${PKG_DIR_NAME}.tar.gz" > "dist/run/${RUN_NAME}"
           chmod +x "dist/run/${RUN_NAME}"
