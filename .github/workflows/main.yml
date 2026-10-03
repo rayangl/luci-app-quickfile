@@ -29,7 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ⚡ 缓存：dl + host 工具链，key 基于 arch/sdk/Cargo.lock
       - name: Cache OpenWrt SDK Build Artifacts
         uses: actions/cache@v4
         with:
@@ -52,39 +51,163 @@ jobs:
       - name: Collect packages
         run: |
           ARCH="${{ matrix.arch }}"
-          mkdir -p dist/release dist/feed
+          mkdir -p dist/release
 
-          # IPK：release 加架构后缀（避免多架构同名覆盖），feed 保留原名
+          # IPK
           for f in bin/packages/${ARCH}/quickfile/*.ipk; do
             [ -f "$f" ] || continue
             [[ "$(basename "$f")" == Packages* ]] && continue
             base=$(basename "$f" .ipk)
             safe="${base//~/.}"
             cp -v "$f" "dist/release/${safe}-${ARCH}.ipk"
-            cp -v "$f" dist/feed/
           done
 
-          # APK：release 加架构后缀，feed 保留原名
+          # APK
           for f in bin/packages/${ARCH}/quickfile/*.apk; do
             [ -f "$f" ] || continue
             [[ "$(basename "$f")" == Packages* ]] && continue
             base=$(basename "$f" .apk)
             safe="${base//~/.}"
             cp -v "$f" "dist/release/${safe}-${ARCH}.apk"
-            cp -v "$f" "dist/feed/${safe}.apk"
           done
 
-          # Feed 索引（仅 feed）
-          for f in bin/packages/${ARCH}/quickfile/Packages* bin/packages/${ARCH}/quickfile/APKINDEX*; do
-            [ -f "$f" ] || continue
-            cp -v "$f" dist/feed/
-          done
+      - name: Build per-arch installer tarball
+        run: |
+          set -e
+          ARCH="${{ matrix.arch }}"
+          SDK="${{ matrix.sdk }}"
+
+          QF=$(ls dist/release/quickfile-*-${ARCH}.apk 2>/dev/null | head -1 || true)
+          [ -z "$QF" ] && QF=$(ls dist/release/quickfile_*-${ARCH}.ipk 2>/dev/null | head -1 || true)
+          if [ -z "$QF" ]; then
+            echo "No quickfile package found, skip tarball"
+            exit 0
+          fi
+
+          VER=$(basename "$QF" | sed -E 's/^quickfile[-_]([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          echo "Detected version: $VER"
+
+          DIRNAME="${SDK}_quickfile_${VER}_${ARCH}"
+          rm -rf "bundle/${DIRNAME}"
+          mkdir -p "bundle/${DIRNAME}"
+
+          # 拷贝该架构的包
+          cp -v dist/release/quickfile-*-${ARCH}.apk   "bundle/${DIRNAME}/" 2>/dev/null || true
+          cp -v dist/release/quickfile_*-${ARCH}.ipk   "bundle/${DIRNAME}/" 2>/dev/null || true
+          cp -v dist/release/luci-app-quickfile-*.apk  "bundle/${DIRNAME}/" 2>/dev/null || true
+          cp -v dist/release/luci-app-quickfile_*.ipk  "bundle/${DIRNAME}/" 2>/dev/null || true
+          cp -v dist/release/luci-i18n-quickfile-zh-cn-*.apk "bundle/${DIRNAME}/" 2>/dev/null || true
+          cp -v dist/release/luci-i18n-quickfile-zh-cn_*.ipk "bundle/${DIRNAME}/" 2>/dev/null || true
+
+          # install.sh
+          cat > "bundle/${DIRNAME}/install.sh" <<'INSTALL_EOF'
+#!/bin/sh
+set -e
+PKG_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if command -v opkg >/dev/null 2>&1; then
+    PKG_MGR=opkg
+    INSTALL="opkg install --force-reinstall"
+elif command -v apk >/dev/null 2>&1; then
+    PKG_MGR=apk
+    INSTALL="apk add --allow-untrusted"
+else
+    echo "ERROR: no opkg / apk found"
+    exit 1
+fi
+echo "Using package manager: $PKG_MGR"
+
+# 自动装 nginx（若未装），opkg / apk 分别处理
+if ! command -v nginx >/dev/null 2>&1; then
+    echo "Installing nginx..."
+    if [ "$PKG_MGR" = "opkg" ]; then
+        opkg update 2>/dev/null || true
+        opkg install nginx 2>/dev/null || true
+    else
+        apk update 2>/dev/null || true
+        apk add nginx 2>/dev/null || true
+    fi
+fi
+
+# 先装 quickfile 主包，再装 luci-*（保证依赖顺序）
+for pkg in "$PKG_DIR"/quickfile*.apk "$PKG_DIR"/quickfile*.ipk; do
+    [ -f "$pkg" ] || continue
+    echo "Installing $(basename "$pkg")..."
+    $INSTALL "$pkg"
+done
+for pkg in "$PKG_DIR"/luci-*.apk "$PKG_DIR"/luci-*.ipk; do
+    [ -f "$pkg" ] || continue
+    echo "Installing $(basename "$pkg")..."
+    $INSTALL "$pkg"
+done
+
+# nginx 语法通过才重启
+if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+    /etc/init.d/nginx enable 2>/dev/null || true
+    /etc/init.d/nginx restart 2>/dev/null || true
+fi
+
+# 启动 quickfile
+/etc/init.d/quickfile enable 2>/dev/null || true
+/etc/init.d/quickfile restart 2>/dev/null || true
+
+# nginx 版本警告（CVE-2026-42945）
+if command -v nginx >/dev/null 2>&1; then
+    NGINX_VER=$(nginx -v 2>&1 | sed -E 's/.*nginx\/([0-9.]+).*/\1/')
+    MAJOR=$(echo "$NGINX_VER" | cut -d. -f1)
+    MINOR=$(echo "$NGINX_VER" | cut -d. -f2)
+    if [ "${MAJOR:-0}" -lt 1 ] || { [ "${MAJOR:-0}" -eq 1 ] && [ "${MINOR:-0}" -lt 30 ]; }; then
+        echo ""
+        echo "⚠️  警告：当前 nginx 版本 $NGINX_VER < 1.30.1"
+        echo "    存在 CVE-2026-42945 相关风险。"
+        echo "    请勿将 8080 端口暴露到公网！"
+        echo ""
+    fi
+fi
+
+echo ""
+echo "=============================================="
+echo " QuickFile 安装完成"
+echo " 访问: http://<路由器IP>:8080/cgi-bin/luci/quickfile"
+echo " 警告: 请勿将 8080 端口暴露到公网。"
+echo " 卸载: sh $PKG_DIR/uninstall.sh"
+echo "=============================================="
+INSTALL_EOF
+          chmod +x "bundle/${DIRNAME}/install.sh"
+
+          # uninstall.sh
+          cat > "bundle/${DIRNAME}/uninstall.sh" <<'UNINSTALL_EOF'
+#!/bin/sh
+set -e
+if command -v opkg >/dev/null 2>&1; then
+    opkg remove luci-app-quickfile quickfile luci-i18n-quickfile-zh-cn 2>/dev/null || true
+elif command -v apk >/dev/null 2>&1; then
+    apk del luci-app-quickfile quickfile luci-i18n-quickfile-zh-cn 2>/dev/null || true
+fi
+
+rm -f /etc/nginx/conf.d/quickfile-server.conf
+rm -rf /etc/nginx/quickfile-locations
+
+if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+    /etc/init.d/nginx reload 2>/dev/null || true
+fi
+
+echo "卸载完成。Web 后台不受影响。"
+UNINSTALL_EOF
+          chmod +x "bundle/${DIRNAME}/uninstall.sh"
+
+          mkdir -p dist/bundles
+          tar -czf "dist/bundles/${DIRNAME}.tar.gz" -C bundle "${DIRNAME}"
+          echo "Built: dist/bundles/${DIRNAME}.tar.gz"
+          tar -tzf "dist/bundles/${DIRNAME}.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: packages-sdk${{ matrix.sdk }}-${{ matrix.arch }}
-          path: dist/
+          path: |
+            dist/release/
+            dist/bundles/
           if-no-files-found: ignore
 
   release:
@@ -112,6 +235,7 @@ jobs:
         run: |
           mkdir -p dist
           find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
+          find all-artifacts -path "*/bundles/*" -type f -exec cp -v {} dist/ \;
 
       - name: Determine tag & prerelease
         id: meta
@@ -132,55 +256,24 @@ jobs:
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
           ARCHS="aarch64_cortex-a53 aarch64_generic x86_64"
           PREVIOUS_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -vxF "${TAG}" | head -1 || true)"
-
-          if [ -n "$PREVIOUS_TAG" ]; then
-            RANGE="${PREVIOUS_TAG}..HEAD"
-          else
-            RANGE="HEAD"
-          fi
-
+          [ -n "$PREVIOUS_TAG" ] && RANGE="${PREVIOUS_TAG}..HEAD" || RANGE="HEAD"
           git log --format='%s%x1f%b%x1e' "$RANGE" > commits.raw
 
           write_section() {
-            title="$1"
-            pattern="$2"
-            awk -v title="$title" -v pattern="$pattern" '
-              BEGIN {
-                RS = "\036"
-                FS = "\037"
-                count = 0
-                IGNORECASE = 1
-              }
+            awk -v title="$1" -v pattern="$2" '
+              BEGIN { RS="\036"; FS="\037"; c=0; IGNORECASE=1 }
               {
-                subject = $1
-                body = $2
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", subject)
-                if (subject == "" || subject ~ /^Merge /) {
-                  next
-                }
-                if (subject ~ pattern) {
-                  item = subject
-                  sub(/^[a-z]+([(][^)]+[)])?!?:[[:space:]]*/, "", item)
-                  issue = ""
-                  text = subject "\n" body
-                  if (match(text, /((Fixes|Closes|Resolves|Refs)[[:space:]]+#[0-9]+)/)) {
-                    issue = " (" substr(text, RSTART, RLENGTH) ")"
-                  } else if (match(text, /#[0-9]+/)) {
-                    issue = " (" substr(text, RSTART, RLENGTH) ")"
-                  }
-                  lines[++count] = "- " item issue
+                sub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
+                if ($1=="" || $1 ~ /^Merge /) next
+                if ($1 ~ pattern) {
+                  item=$1; sub(/^[a-z]+([(][^)]+[)])?!?:[[:space:]]*/, "", item)
+                  issue=""; text=$1"\n"$2
+                  if (match(text, /((Fixes|Closes|Resolves|Refs)[[:space:]]+#[0-9]+)/)) issue=" ("substr(text,RSTART,RLENGTH)")"
+                  else if (match(text, /#[0-9]+/)) issue=" ("substr(text,RSTART,RLENGTH)")"
+                  lines[++c]="- "item issue
                 }
               }
-              END {
-                if (count > 0) {
-                  print "## " title
-                  print ""
-                  for (i = 1; i <= count; i++) {
-                    print lines[i]
-                  }
-                  print ""
-                }
-              }
+              END { if(c>0){print "## "title"\n"; for(i=1;i<=c;i++) print lines[i]; print ""} }
             ' commits.raw
           }
 
@@ -189,37 +282,73 @@ jobs:
             write_section "🐛 Bug Fixes" "^fix"
             write_section "🔧 Other" "^(chore|docs|refactor|perf|test|build|ci)"
 
+            # 一键安装包
+            echo "## 📦 一键安装包（推荐）"
+            echo ""
+            echo "解压后执行 \`sh install.sh\` 即可，自动安装 nginx、配置 8080 端口。"
+            echo "卸载执行 \`sh uninstall.sh\`，不会影响 uHTTPd / LuCI 后台。"
+            echo ""
+            echo "| 架构 | SDK 24.10 | SDK 25.12 |"
+            echo "| :--- | :--- | :--- |"
+            for arch in $ARCHS; do
+              b1=$(ls dist/24.10_quickfile_*_${arch}.tar.gz 2>/dev/null | head -1)
+              b2=$(ls dist/25.12_quickfile_*_${arch}.tar.gz 2>/dev/null | head -1)
+              l1=$([ -n "$b1" ] && echo "[下载](${BASE}/$(basename "$b1"))" || echo "—")
+              l2=$([ -n "$b2" ] && echo "[下载](${BASE}/$(basename "$b2"))" || echo "—")
+              echo "| \`${arch}\` | ${l1} | ${l2} |"
+            done
+            echo ""
+
+            # SDK 24.10 IPK
             echo "## 📦 SDK 24.10 · (IPK)"
             echo ""
-            echo "| 架构 | quickfile | luci-app-quickfile | luci-i18n-quickfile-zh-cn |"
-            echo "| :--- | :--- | :--- | :--- |"
-
-            luci_ipk=$(ls dist/luci-app-quickfile_*.ipk 2>/dev/null | head -1)
-            luci_ipk_link=$([ -n "$luci_ipk" ] && echo "[$(basename "$luci_ipk")](${BASE}/$(basename "$luci_ipk"))" || echo "—")
-            luci_i18n_ipk=$(ls dist/luci-i18n-quickfile-zh-cn_*.ipk 2>/dev/null | head -1)
-            luci_i18n_link=$([ -n "$luci_i18n_ipk" ] && echo "[$(basename "$luci_i18n_ipk")](${BASE}/$(basename "$luci_i18n_ipk"))" || echo "—")
-
+            echo "### 主程序（按架构）"
+            echo ""
+            echo "| 架构 | quickfile |"
+            echo "| :--- | :--- |"
             for arch in $ARCHS; do
               f=$(ls dist/quickfile_*-${arch}.ipk 2>/dev/null | head -1)
               link=$([ -n "$f" ] && echo "[$(basename "$f")](${BASE}/$(basename "$f"))" || echo "—")
-              echo "| \`${arch}\` | ${link} | ${luci_ipk_link} | ${luci_i18n_link} |"
+              echo "| \`${arch}\` | ${link} |"
             done
-
             echo ""
+            echo "### LuCI 前端与语言包（all 架构，通用）"
+            echo ""
+            luci_ipk=$(ls dist/luci-app-quickfile_*.ipk 2>/dev/null | head -1)
+            [ -n "$luci_ipk" ] && echo "- [$(basename "$luci_ipk")](${BASE}/$(basename "$luci_ipk"))"
+            i18n_ipk=$(ls dist/luci-i18n-quickfile-zh-cn_*.ipk 2>/dev/null | head -1)
+            [ -n "$i18n_ipk" ] && echo "- [$(basename "$i18n_ipk")](${BASE}/$(basename "$i18n_ipk"))"
+            echo ""
+
+            # SDK 25.12 APK
             echo "## 📦 SDK 25.12 · (APK)"
             echo ""
-            echo "| 架构 | quickfile | luci-app-quickfile | luci-i18n-quickfile-zh-cn |"
-            echo "| :--- | :--- | :--- | :--- |"
-
+            echo "### 主程序（按架构）"
+            echo ""
+            echo "| 架构 | quickfile |"
+            echo "| :--- | :--- |"
             for arch in $ARCHS; do
-              f_core=$(ls dist/quickfile-*-${arch}.apk 2>/dev/null | head -1)
-              f_luci=$(ls dist/luci-app-quickfile-*-${arch}.apk 2>/dev/null | head -1)
-              f_i18n=$(ls dist/luci-i18n-quickfile-zh-cn-*-${arch}.apk 2>/dev/null | head -1)
-              link_core=$([ -n "$f_core" ] && echo "[$(basename "$f_core")](${BASE}/$(basename "$f_core"))" || echo "—")
-              link_luci=$([ -n "$f_luci" ] && echo "[$(basename "$f_luci")](${BASE}/$(basename "$f_luci"))" || echo "—")
-              link_i18n=$([ -n "$f_i18n" ] && echo "[$(basename "$f_i18n")](${BASE}/$(basename "$f_i18n"))" || echo "—")
-              echo "| \`${arch}\` | ${link_core} | ${link_luci} | ${link_i18n} |"
+              f=$(ls dist/quickfile-*-${arch}.apk 2>/dev/null | head -1)
+              link=$([ -n "$f" ] && echo "[$(basename "$f")](${BASE}/$(basename "$f"))" || echo "—")
+              echo "| \`${arch}\` | ${link} |"
             done
+            echo ""
+            echo "### LuCI 前端与语言包（按架构）"
+            echo ""
+            for arch in $ARCHS; do
+              fl=$(ls dist/luci-app-quickfile-*-${arch}.apk 2>/dev/null | head -1)
+              f_i18n=$(ls dist/luci-i18n-quickfile-zh-cn-*-${arch}.apk 2>/dev/null | head -1)
+              ll=$([ -n "$fl" ] && echo "[$(basename "$fl")](${BASE}/$(basename "$fl"))" || echo "—")
+              li=$([ -n "$f_i18n" ] && echo "[$(basename "$f_i18n")](${BASE}/$(basename "$f_i18n"))" || echo "—")
+              echo "- \`${arch}\`: luci=${ll}  i18n=${li}"
+            done
+            echo ""
+
+            echo "---"
+            echo ""
+            echo "> **安全提示**：当前 OpenWrt 源的 nginx 为 1.26.3，"
+            echo "> 受 CVE-2026-42945 相似风险影响。**请勿将 8080 端口暴露到公网**，"
+            echo "> 建议仅局域网使用。"
           } > release_notes.md
 
           cat release_notes.md
@@ -241,6 +370,7 @@ jobs:
           name: Release ${{ steps.meta.outputs.tag }}
           body_path: release_notes.md
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          files: dist/**
+          files: |
+            dist/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
