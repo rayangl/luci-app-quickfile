@@ -60,5 +60,38 @@ define Package/quickfile/install
 		$(1)/etc/nginx/quickfile-locations/quickfile.locations
 endef
 
+define Package/quickfile/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || {
+	if [ -x /etc/init.d/nginx ]; then
+		/etc/init.d/nginx enable 2>/dev/null
+		if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+			/etc/init.d/nginx restart 2>/dev/null
+		fi
+	fi
+	/etc/init.d/quickfile enable 2>/dev/null
+	/etc/init.d/quickfile restart 2>/dev/null
+	echo ""
+	echo "QuickFile installed."
+	echo "Access: http://<router-ip>:8080/cgi-bin/luci/quickfile"
+	echo "Note: LAN only recommended."
+	exit 0
+}
+endef
+
+define Package/quickfile/prerm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || {
+	/etc/init.d/quickfile stop 2>/dev/null
+	/etc/init.d/quickfile disable 2>/dev/null
+	rm -f /etc/nginx/conf.d/quickfile-server.conf
+	rm -rf /etc/nginx/quickfile-locations
+	if [ -x /etc/init.d/nginx ] && command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
+		/etc/init.d/nginx reload 2>/dev/null
+	fi
+	exit 0
+}
+endef
+
 $(eval $(call RustBinPackage,quickfile))
 $(eval $(call BuildPackage,quickfile))
