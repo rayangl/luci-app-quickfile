@@ -99,102 +99,10 @@ jobs:
           cp -v dist/release/luci-i18n-quickfile-zh-cn-*.apk "bundle/${DIRNAME}/" 2>/dev/null || true
           cp -v dist/release/luci-i18n-quickfile-zh-cn_*.ipk "bundle/${DIRNAME}/" 2>/dev/null || true
 
-          # install.sh
-          cat > "bundle/${DIRNAME}/install.sh" <<'INSTALL_EOF'
-#!/bin/sh
-set -e
-PKG_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-if command -v opkg >/dev/null 2>&1; then
-    PKG_MGR=opkg
-    INSTALL="opkg install --force-reinstall"
-elif command -v apk >/dev/null 2>&1; then
-    PKG_MGR=apk
-    INSTALL="apk add --allow-untrusted"
-else
-    echo "ERROR: no opkg / apk found"
-    exit 1
-fi
-echo "Using package manager: $PKG_MGR"
-
-# 自动装 nginx（若未装），opkg / apk 分别处理
-if ! command -v nginx >/dev/null 2>&1; then
-    echo "Installing nginx..."
-    if [ "$PKG_MGR" = "opkg" ]; then
-        opkg update 2>/dev/null || true
-        opkg install nginx 2>/dev/null || true
-    else
-        apk update 2>/dev/null || true
-        apk add nginx 2>/dev/null || true
-    fi
-fi
-
-# 先装 quickfile 主包，再装 luci-*（保证依赖顺序）
-for pkg in "$PKG_DIR"/quickfile*.apk "$PKG_DIR"/quickfile*.ipk; do
-    [ -f "$pkg" ] || continue
-    echo "Installing $(basename "$pkg")..."
-    $INSTALL "$pkg"
-done
-for pkg in "$PKG_DIR"/luci-*.apk "$PKG_DIR"/luci-*.ipk; do
-    [ -f "$pkg" ] || continue
-    echo "Installing $(basename "$pkg")..."
-    $INSTALL "$pkg"
-done
-
-# nginx 语法通过才重启
-if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
-    /etc/init.d/nginx enable 2>/dev/null || true
-    /etc/init.d/nginx restart 2>/dev/null || true
-fi
-
-# 启动 quickfile
-/etc/init.d/quickfile enable 2>/dev/null || true
-/etc/init.d/quickfile restart 2>/dev/null || true
-
-# nginx 版本警告（CVE-2026-42945）
-if command -v nginx >/dev/null 2>&1; then
-    NGINX_VER=$(nginx -v 2>&1 | sed -E 's/.*nginx\/([0-9.]+).*/\1/')
-    MAJOR=$(echo "$NGINX_VER" | cut -d. -f1)
-    MINOR=$(echo "$NGINX_VER" | cut -d. -f2)
-    if [ "${MAJOR:-0}" -lt 1 ] || { [ "${MAJOR:-0}" -eq 1 ] && [ "${MINOR:-0}" -lt 30 ]; }; then
-        echo ""
-        echo "⚠️  警告：当前 nginx 版本 $NGINX_VER < 1.30.1"
-        echo "    存在 CVE-2026-42945 相关风险。"
-        echo "    请勿将 8080 端口暴露到公网！"
-        echo ""
-    fi
-fi
-
-echo ""
-echo "=============================================="
-echo " QuickFile 安装完成"
-echo " 访问: http://<路由器IP>:8080/cgi-bin/luci/quickfile"
-echo " 警告: 请勿将 8080 端口暴露到公网。"
-echo " 卸载: sh $PKG_DIR/uninstall.sh"
-echo "=============================================="
-INSTALL_EOF
-          chmod +x "bundle/${DIRNAME}/install.sh"
-
-          # uninstall.sh
-          cat > "bundle/${DIRNAME}/uninstall.sh" <<'UNINSTALL_EOF'
-#!/bin/sh
-set -e
-if command -v opkg >/dev/null 2>&1; then
-    opkg remove luci-app-quickfile quickfile luci-i18n-quickfile-zh-cn 2>/dev/null || true
-elif command -v apk >/dev/null 2>&1; then
-    apk del luci-app-quickfile quickfile luci-i18n-quickfile-zh-cn 2>/dev/null || true
-fi
-
-rm -f /etc/nginx/conf.d/quickfile-server.conf
-rm -rf /etc/nginx/quickfile-locations
-
-if command -v nginx >/dev/null 2>&1 && nginx -t >/dev/null 2>&1; then
-    /etc/init.d/nginx reload 2>/dev/null || true
-fi
-
-echo "卸载完成。Web 后台不受影响。"
-UNINSTALL_EOF
-          chmod +x "bundle/${DIRNAME}/uninstall.sh"
+          # 从仓库复制脚本模板（去掉 .template 后缀）
+          cp -v scripts/install.sh.template   "bundle/${DIRNAME}/install.sh"
+          cp -v scripts/uninstall.sh.template "bundle/${DIRNAME}/uninstall.sh"
+          chmod +x "bundle/${DIRNAME}/install.sh" "bundle/${DIRNAME}/uninstall.sh"
 
           mkdir -p dist/bundles
           tar -czf "dist/bundles/${DIRNAME}.tar.gz" -C bundle "${DIRNAME}"
