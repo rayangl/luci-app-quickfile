@@ -1,0 +1,18 @@
+#!/bin/sh
+# 自解压安装头：读本文件尾部追加的 tar.gz，解压到临时目录并执行 install.sh
+set -e
+
+SKIP=$(awk '/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0; }' "$0")
+[ -z "$SKIP" ] && { echo "ERROR: archive marker not found"; exit 1; }
+
+TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t qf)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+tail -n +"$SKIP" "$0" | tar -xz -C "$TMPDIR"
+[ $? -ne 0 ] && { echo "ERROR: extract failed"; exit 1; }
+
+SUBDIR=$(ls "$TMPDIR" | head -1)
+cd "$TMPDIR/$SUBDIR"
+sh install.sh
+exit 0
+__ARCHIVE_BELOW__
