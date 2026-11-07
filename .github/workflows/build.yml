@@ -1,4 +1,4 @@
-name: Build Quickfile (Native Docker)
+name: Build Quickfile (SDK Native)
 
 on:
   workflow_dispatch:
@@ -21,58 +21,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare workspace
-        run: |
-          mkdir -p openwrt
-          chmod -R +x scripts/ || true
-
-      # 使用官方原生 Docker 编译，日志完全实时可见
-      - name: Build with OpenWrt SDK Docker
+      - name: Download & Extract SDK
         env:
           TARGET_ARCH: ${{ github.event.inputs.arch }}
         run: |
-          echo "正在准备编译环境..."
+          echo "正在准备下载 OpenWrt 25.12 SDK..."
+          mkdir -p sdk_root
           
-          # 既然是 aarch64_generic，我们使用官方的 armsr/armv8 (ARM SystemReady) SDK，兼容性最好
-          if [ "$TARGET_ARCH" = "aarch64_generic" ]; then
-            SDK_IMAGE="ghcr.io/openwrt/sdk:armsr-armv8-25.12"
-          else
-            # 如果是 cortex-a53，常用的是 mediatek/filogic 或 rockchip/armv8，这里以通用的 armsr 代替，或者你可以根据实际设备修改
-            SDK_IMAGE="ghcr.io/openwrt/sdk:armsr-armv8-25.12"
-          fi
+          # 使用 OpenWrt 官方 snapshots 仓库的 25.12 SDK (对应 iStoreOS 25.12 的底层)
+          # 注意：如果这个具体的版本号过期了，你可以去 https://downloads.openwrt.org/snapshots/targets/armsr/armv8/ 找一个最新的 SDK 链接替换
+          SDK_FILE="openwrt-sdk-25.12.0-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          SDK_URL="https://downloads.openwrt.org/releases/25.12.0-rc1/targets/armsr/armv8/${SDK_FILE}"
+          
+          echo "正在下载: $SDK_URL"
+          # 使用 wget 下载，你可以实时看到下载进度
+          wget -q --show-progress "$SDK_URL" -O sdk.tar.zst || { echo "下载失败，尝试备用链接..."; exit 1; }
+          
+          echo "正在解压 SDK..."
+          tar -I zstd -xf sdk.tar.zst -C sdk_root --strip-components=1
+          rm sdk.tar.zst
+          
+          echo "SDK 准备完毕。"
+          ls -la sdk_root/
 
-          docker pull $SDK_IMAGE
+      - name: Compile Quickfile
+        run: |
+          cd sdk_root
+          set -e
           
-          # 运行编译容器
-          docker run --rm -v "$(pwd)":/work -w /work \
-            $SDK_IMAGE \
-            /bin/bash -c '
-              set -e
-              echo "=> 克隆源码到 package 目录..."
-              git clone https://github.com/${GITHUB_REPOSITORY}.git package/quickfile
-              
-              echo "=> 更新 feeds..."
-              ./scripts/feeds update -a
-              ./scripts/feeds install -a
-              
-              echo "=> 生成默认配置..."
-              make defconfig
-              
-              echo "=> 开始编译 quickfile (V=s)..."
-              make package/quickfile/quickfile/compile V=s -j$(nproc)
-              
-              echo "=> 开始编译 luci-app-quickfile (V=s)..."
-              make package/quickfile/luci-app-quickfile/compile V=s -j$(nproc)
-            '
+          echo "=> 克隆源码到 package 目录..."
+          git clone https://github.com/${GITHUB_REPOSITORY}.git package/quickfile
+          
+          echo "=> 更新 feeds..."
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+          echo "=> 生成默认配置..."
+          make defconfig
+          
+          echo "=> 开始编译 quickfile (V=s)..."
+          make package/quickfile/quickfile/compile V=s -j$(nproc)
+          
+          echo "=> 开始编译 luci-app-quickfile (V=s)..."
+          make package/quickfile/luci-app-quickfile/compile V=s -j$(nproc)
 
       - name: Collect APK packages
         run: |
           mkdir -p work/raw
-          # 在 Docker 编译后，产物会生成在 openwrt/bin 下
-          find openwrt/bin -type f -name "*.apk" -exec cp -v {} work/raw/ \; || true
-          # 如果 25.12 还没完全切换到 apk，兼容一下 ipk
-          find openwrt/bin -type f -name "*.ipk" -exec cp -v {} work/raw/ \; || true
-          
+          # 收集编译产生的 .apk (25.12 默认格式)
+          find sdk_root/bin -type f -name "*.apk" -exec cp -v {} work/raw/ \; || true
           echo "收集到的文件:"
           ls -lh work/raw/
 
@@ -83,12 +80,10 @@ jobs:
           set -e
           SDK="25.12"
           
-          # 优先找 apk，没有再找 ipk
+          # 寻找 APK
           QF=$(ls work/raw/quickfile-*.apk 2>/dev/null | head -1 || true)
-          [ -z "$QF" ] && QF=$(ls work/raw/quickfile_*.ipk 2>/dev/null | head -1 || true)
-          
           if [ -z "$QF" ]; then
-            echo "Error: No quickfile package found!"
+            echo "Error: No quickfile APK found!"
             exit 1
           fi
 
@@ -99,12 +94,14 @@ jobs:
           rm -rf "bundle/${PKG_DIR_NAME}"
           mkdir -p "bundle/${PKG_DIR_NAME}"
           
-          cp -v work/raw/*.apk "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
-          cp -v work/raw/*.ipk "bundle/${PKG_DIR_NAME}/" 2>/dev/null || true
+          # 仅拷贝 APK
+          cp -v work/raw/*.apk "bundle/${PKG_DIR_NAME}/"
           
+          # 你的安装脚本
           cp -v scripts/install.sh.template "bundle/${PKG_DIR_NAME}/install.sh"
           chmod +x "bundle/${PKG_DIR_NAME}/install.sh"
 
+          # 打包
           tar -czf "work/${PKG_DIR_NAME}.tar.gz" -C bundle "${PKG_DIR_NAME}"
           mkdir -p dist/run
           cat scripts/run-header.sh.template "work/${PKG_DIR_NAME}.tar.gz" > "dist/run/${RUN_NAME}"
