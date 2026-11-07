@@ -171,7 +171,7 @@ jobs:
           tag_name: v${{ env.PKG_VERSION }}-${{ github.event.inputs.arch }}
           name: Quickfile v${{ env.PKG_VERSION }} (${{ github.event.inputs.arch }})
           draft: false
-          prerelease: true
+          prerelease: false
           files: dist/run/*.run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
