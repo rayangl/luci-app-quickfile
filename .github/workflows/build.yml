@@ -16,68 +16,47 @@ jobs:
   build:
     name: Build ${{ github.event.inputs.arch }}
     runs-on: ubuntu-latest
+    # 保留超时保护，防止假死
     timeout-minutes: 120 
     
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 添加缓存机制 (针对下载的源码和 SDK 内部编译缓存)
-      - name: Cache OpenWrt Downloads & Toolchain
+      # 缓存机制保留，加速编译
+      - name: Cache OpenWrt SDK Build Artifacts
         uses: actions/cache@v4
         with:
           path: |
             openwrt/dl
             openwrt/staging_dir
             openwrt/build_dir
-          # 使用架构和 quickfile 的 Makefile 的 hash 作为缓存键，代码没变就不重新编译
-          key: ow-${{ github.event.inputs.arch }}-${{ hashFiles('quickfile/Makefile') }}
+          key: ow-sdk-${{ github.event.inputs.arch }}-${{ hashFiles('quickfile/Makefile') }}
           restore-keys: |
-            ow-${{ github.event.inputs.arch }}-
+            ow-sdk-${{ github.event.inputs.arch }}-
 
-      - name: Prepare workspace
-        run: |
-          mkdir -p openwrt
-          chmod -R +x scripts/ || true
-
-      # 2. Docker 编译 (已包含 V=s 详细日志)
-      - name: Build with OpenWrt SDK Docker
+      # 使用 gh-action-sdk 自动处理 Target 映射
+      - name: Build packages
+        uses: openwrt/gh-action-sdk@main
         env:
-          TARGET_ARCH: ${{ github.event.inputs.arch }}
-        run: |
-          SDK="25.12"
-          echo "正在为 $TARGET_ARCH 编译..."
-          
-          docker pull ghcr.io/openwrt/sdk:$TARGET_ARCH-$SDK
-          
-          # 注意这里的 V=s，如果出错，会打印出最详细的 make 错误栈
-          # -j$(nproc) 开启多线程加速
-          docker run --rm -v "$(pwd)":/work -w /work \
-            ghcr.io/openwrt/sdk:$TARGET_ARCH-$SDK \
-            /bin/bash -c '
-              set -e
-              echo "=> 克隆源码至 package 目录..."
-              git clone https://github.com/${GITHUB_REPOSITORY}.git package/quickfile
-              
-              echo "=> 更新 feeds..."
-              ./scripts/feeds update -a
-              ./scripts/feeds install -a
-              
-              echo "=> 生成配置..."
-              make defconfig
-              
-              echo "=> 开始编译 quickfile (V=s)..."
-              make package/quickfile/quickfile/compile V=s -j$(nproc)
-              
-              echo "=> 开始编译 luci-app-quickfile (V=s)..."
-              make package/quickfile/luci-app-quickfile/compile V=s -j$(nproc)
-            '
+          ARCH: ${{ github.event.inputs.arch }}-openwrt-25.12
+          FEEDNAME: quickfile
+          PACKAGES: quickfile luci-app-quickfile
+          NO_REFRESH_CHECK: true
+          INDEX: 1
+          # 开启详细日志
+          V: s
 
       - name: Collect APK packages
         env:
           TARGET_ARCH: ${{ github.event.inputs.arch }}
         run: |
           mkdir -p work/raw
-          find openwrt/bin/packages -type f -name "*.apk" -exec cp -v {} work/raw/ \;
+          # gh-action-sdk 默认把产物放在 bin/packages/架构名/quickfile/
+          ARCH_DIR="${{ github.event.inputs.arch }}"
+          
+          # 查找所有 .apk 并拷贝
+          find bin/packages -type f -name "*.apk" -exec cp -v {} work/raw/ \;
+          
           echo "收集到的 APK 文件:"
           ls -lh work/raw/
 
@@ -101,11 +80,14 @@ jobs:
           rm -rf "bundle/${PKG_DIR_NAME}"
           mkdir -p "bundle/${PKG_DIR_NAME}"
           
+          # 仅拷贝 APK
           cp -v work/raw/*.apk "bundle/${PKG_DIR_NAME}/"
           
+          # 拷贝并设置安装脚本
           cp -v scripts/install.sh.template "bundle/${PKG_DIR_NAME}/install.sh"
           chmod +x "bundle/${PKG_DIR_NAME}/install.sh"
 
+          # 生成 .run
           tar -czf "work/${PKG_DIR_NAME}.tar.gz" -C bundle "${PKG_DIR_NAME}"
           mkdir -p dist/run
           cat scripts/run-header.sh.template "work/${PKG_DIR_NAME}.tar.gz" > "dist/run/${RUN_NAME}"
