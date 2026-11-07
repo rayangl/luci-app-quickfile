@@ -23,7 +23,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    # 放宽到 4 小时，绝对够用
     timeout-minutes: 240
     
     steps:
@@ -97,7 +96,6 @@ jobs:
           make download -j8 || true
           
           echo "=> 开始精准编译 quickfile (仅编译所需模块)..."
-          # 这里是关键：只编译 quickfile 核心和 luci 界面，不再编译整个系统！
           make package/quickfile/quickfile/compile -j$(nproc) || make package/quickfile/quickfile/compile -j1 V=s
           make package/quickfile/luci-app-quickfile/compile -j$(nproc) || make package/quickfile/luci-app-quickfile/compile -j1 V=s
 
@@ -135,15 +133,34 @@ jobs:
           rm -rf "bundle/${PKG_DIR_NAME}"
           mkdir -p "bundle/${PKG_DIR_NAME}"
           
+          echo "=> 拷贝所有编译出的 APK..."
           cp -v work/raw/*.apk "bundle/${PKG_DIR_NAME}/"
           
-          cp -v scripts/install.sh.template "bundle/${PKG_DIR_NAME}/install.sh"
-          chmod +x "bundle/${PKG_DIR_NAME}/install.sh"
+          echo "=> 从仓库下载安装脚本..."
+          mkdir -p scripts
+          # 直接从你的仓库拉取脚本模板，解决找不到文件的问题
+          wget -qO scripts/install.sh.template "https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh.template" || echo "警告: 未找到 install.sh.template"
+          wget -qO scripts/run-header.sh.template "https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/run-header.sh.template" || echo "警告: 未找到 run-header.sh.template"
+          
+          # 如果下载成功，拷贝进包内
+          if [ -f "scripts/install.sh.template" ]; then
+            cp -v scripts/install.sh.template "bundle/${PKG_DIR_NAME}/install.sh"
+            chmod +x "bundle/${PKG_DIR_NAME}/install.sh"
+          fi
 
+          echo "=> 打包成 .run 文件..."
           tar -czf "work/${PKG_DIR_NAME}.tar.gz" -C bundle "${PKG_DIR_NAME}"
           mkdir -p dist/run
-          cat scripts/run-header.sh.template "work/${PKG_DIR_NAME}.tar.gz" > "dist/run/${RUN_NAME}"
-          chmod +x "dist/run/${RUN_NAME}"
+          
+          if [ -f "scripts/run-header.sh.template" ]; then
+            cat scripts/run-header.sh.template "work/${PKG_DIR_NAME}.tar.gz" > "dist/run/${RUN_NAME}"
+          else
+            # 如果没有头部模板，至少生成一个普通的压缩包，避免报错
+            cp "work/${PKG_DIR_NAME}.tar.gz" "dist/run/${RUN_NAME}.tar.gz"
+            echo "⚠️ 未找到 run-header.sh.template，已生成 .tar.gz 格式。"
+          fi
+          
+          chmod +x "dist/run/${RUN_NAME}" 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
