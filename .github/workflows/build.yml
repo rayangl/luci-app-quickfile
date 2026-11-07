@@ -1,4 +1,4 @@
-name: Build Quickfile (OpenWrt 25.12)
+name: Build Quickfile (OpenWrt 25.12 APK)
 
 on:
   workflow_dispatch:
@@ -66,8 +66,6 @@ jobs:
           ./scripts/feeds install -a
 
       - name: Load custom configuration & Clone Plugin
-        env:
-          TARGET_ARCH: ${{ github.event.inputs.arch }}
         run: |
           cd openwrt
           rm -f .config
@@ -95,7 +93,7 @@ jobs:
           echo "=> 预下载依赖包..."
           make download -j8 || true
           
-          echo "=> 开始精准编译 quickfile (仅编译所需模块)..."
+          echo "=> 开始精准编译 quickfile..."
           make package/quickfile/quickfile/compile -j$(nproc) || make package/quickfile/quickfile/compile -j1 V=s
           make package/quickfile/luci-app-quickfile/compile -j$(nproc) || make package/quickfile/luci-app-quickfile/compile -j1 V=s
 
@@ -106,72 +104,43 @@ jobs:
           path: openwrt
           key: quickfile-openwrt-25.12-${{ runner.os }}
 
-      - name: Collect APK packages
+      # ================= 关键修改点 =================
+      # 只提取核心包，不再提取各种系统底层依赖包（避免 nginx、dnsmasq 冲突）
+      - name: Collect Core APK packages
         run: |
-          mkdir -p work/raw
-          find openwrt/bin/packages -type f -name "*.apk" -exec cp -v {} work/raw/ \; || true
-          echo "收集到的 APK 文件:"
-          ls -lh work/raw/
-
-      - name: Build .run installer (APK only)
-        env:
-          TARGET_ARCH: ${{ github.event.inputs.arch }}
-        run: |
-          set -e
-          SDK="25.12"
+          mkdir -p dist/apk
+          echo "=> 查找核心 APK..."
           
-          QF=$(ls work/raw/quickfile-*.apk 2>/dev/null | head -1 || true)
-          if [ -z "$QF" ]; then
-            echo "Error: No quickfile APK found!"
-            exit 1
-          fi
-
-          VER=$(basename "$QF" | sed -E 's/^quickfile[-_]([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-          echo "PKG_VERSION=${VER}" >> $GITHUB_ENV
+          # 递归搜索并精确匹配我们需要的那三个包
+          find openwrt/bin/packages -type f -name "quickfile-*.apk" -exec cp -v {} dist/apk/ \;
+          find openwrt/bin/packages -type f -name "luci-app-quickfile-*.apk" -exec cp -v {} dist/apk/ \;
+          find openwrt/bin/packages -type f -name "luci-i18n-quickfile-*.apk" -exec cp -v {} dist/apk/ \;
           
-          PKG_DIR_NAME="${SDK}_quickfile_${VER}_${TARGET_ARCH}"
-          RUN_NAME="${PKG_DIR_NAME}.run"
+          echo "=> 最终收集到的文件:"
+          ls -lh dist/apk/
 
-          rm -rf "bundle/${PKG_DIR_NAME}"
-          mkdir -p "bundle/${PKG_DIR_NAME}"
-          
-          echo "=> 拷贝所有编译出的 APK 到安装包中..."
-          cp -v work/raw/*.apk "bundle/${PKG_DIR_NAME}/"
-
-          echo "=> 打包并生成 .run 文件..."
-          tar -czf "work/${PKG_DIR_NAME}.tar.gz" -C bundle "${PKG_DIR_NAME}"
-          mkdir -p dist/run
-          
-          cat > dist/run/${RUN_NAME} << 'RUNEOF'
-          #!/bin/sh
-          ARCHIVE_LINE=$(awk '/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0; }' "$0")
-          tail -n +$ARCHIVE_LINE "$0" | tar -xz -C /tmp
-          echo "正在安装所有依赖包..."
-          cd /tmp/__PKG_DIR__
-          apk add --allow-untrusted *.apk
-          echo "安装完成！"
-          exit 0
-          __ARCHIVE_BELOW__
-          RUNEOF
-          
-          sed -i "s/__PKG_DIR__/${PKG_DIR_NAME}/g" "dist/run/${RUN_NAME}"
-          cat "work/${PKG_DIR_NAME}.tar.gz" >> "dist/run/${RUN_NAME}"
-          chmod +x "dist/run/${RUN_NAME}"
-
-      - name: Upload artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: run-${{ github.event.inputs.arch }}
-          path: dist/run/
+          name: quickfile-apk-${{ github.event.inputs.arch }}
+          path: dist/apk/
+
+      - name: Get Version
+        id: get_version
+        run: |
+          # 从收集到的 quickfile 包里提取版本号
+          QF=$(ls dist/apk/quickfile-*.apk | head -1)
+          VER=$(basename "$QF" | sed -E 's/^quickfile[-_]([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          echo "VERSION=$VER" >> $GITHUB_ENV
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
-        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'workflow_dispatch'
         with:
-          tag_name: v${{ env.PKG_VERSION }}-${{ github.event.inputs.arch }}
-          name: Quickfile v${{ env.PKG_VERSION }} (${{ github.event.inputs.arch }})
+          tag_name: v${{ env.VERSION }}-${{ github.event.inputs.arch }}
+          name: Quickfile v${{ env.VERSION }} (${{ github.event.inputs.arch }}) - APK
           draft: false
           prerelease: false
-          files: dist/run/*.run
+          files: dist/apk/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
