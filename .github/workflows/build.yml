@@ -127,7 +127,6 @@ jobs:
           fi
 
           VER=$(basename "$QF" | sed -E 's/^quickfile[-_]([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-          # 把版本号输出到环境变量，供后面的 Release 步骤使用
           echo "PKG_VERSION=${VER}" >> $GITHUB_ENV
           
           PKG_DIR_NAME="${SDK}_quickfile_${VER}_${TARGET_ARCH}"
@@ -143,24 +142,19 @@ jobs:
           tar -czf "work/${PKG_DIR_NAME}.tar.gz" -C bundle "${PKG_DIR_NAME}"
           mkdir -p dist/run
           
-          # 生成标准的自解压脚本
           cat > dist/run/${RUN_NAME} << 'RUNEOF'
-#!/bin/sh
-# 自解压安装脚本
-ARCHIVE_LINE=$(awk '/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0; }' "$0")
-tail -n +$ARCHIVE_LINE "$0" | tar -xz -C /tmp
-echo "正在安装所有依赖包..."
-cd /tmp/__PKG_DIR__
-apk add --allow-untrusted *.apk
-echo "安装完成！"
-exit 0
-__ARCHIVE_BELOW__
-RUNEOF
+          #!/bin/sh
+          ARCHIVE_LINE=$(awk '/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0; }' "$0")
+          tail -n +$ARCHIVE_LINE "$0" | tar -xz -C /tmp
+          echo "正在安装所有依赖包..."
+          cd /tmp/__PKG_DIR__
+          apk add --allow-untrusted *.apk
+          echo "安装完成！"
+          exit 0
+          __ARCHIVE_BELOW__
+          RUNEOF
           
-          # 动态替换脚本里的文件夹名
           sed -i "s/__PKG_DIR__/${PKG_DIR_NAME}/g" "dist/run/${RUN_NAME}"
-          
-          # 将 tar.gz 的二进制内容拼接到脚本末尾
           cat "work/${PKG_DIR_NAME}.tar.gz" >> "dist/run/${RUN_NAME}"
           chmod +x "dist/run/${RUN_NAME}"
 
@@ -174,7 +168,6 @@ RUNEOF
         uses: softprops/action-gh-release@v2
         if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
         with:
-          # 使用提取出来的真实版本号，加上架构，避免冲突
           tag_name: v${{ env.PKG_VERSION }}-${{ github.event.inputs.arch }}
           name: Quickfile v${{ env.PKG_VERSION }} (${{ github.event.inputs.arch }})
           draft: false
