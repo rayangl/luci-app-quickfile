@@ -165,5 +165,17 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: v${{ github.run_number }}-${{ github.event.inputs.arch }}
+          name: Quickfile Build ${{ github.run_number }} (${{ github.event.inputs.arch }})
+          draft: false
+          prerelease: true
+          files: dist/run/*.run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           name: run-${{ github.event.inputs.arch }}
           path: dist/run/
