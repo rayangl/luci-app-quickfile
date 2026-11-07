@@ -165,6 +165,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          name: run-${{ github.event.inputs.arch }}
+          path: dist/run/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -177,5 +179,3 @@ jobs:
           files: dist/run/*.run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          name: run-${{ github.event.inputs.arch }}
-          path: dist/run/
