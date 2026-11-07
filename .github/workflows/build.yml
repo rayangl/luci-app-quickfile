@@ -14,7 +14,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
 
 env:
   TZ: Asia/Shanghai
@@ -94,6 +93,7 @@ jobs:
           make download -j8 || true
           
           echo "=> 开始精准编译 quickfile..."
+          # 两个包挨着编译，系统会自动处理依赖，不会全量编
           make package/quickfile/quickfile/compile -j$(nproc) || make package/quickfile/quickfile/compile -j1 V=s
           make package/quickfile/luci-app-quickfile/compile -j$(nproc) || make package/quickfile/luci-app-quickfile/compile -j1 V=s
 
@@ -104,19 +104,20 @@ jobs:
           path: openwrt
           key: quickfile-openwrt-25.12-${{ runner.os }}
 
-      # ================= 关键修改点 =================
-      # 只提取核心包，不再提取各种系统底层依赖包（避免 nginx、dnsmasq 冲突）
+      # ================= 纯净收集 =================
       - name: Collect Core APK packages
         run: |
           mkdir -p dist/apk
-          echo "=> 查找核心 APK..."
+          echo "=> 提取所需的 APK..."
           
-          # 递归搜索并精确匹配我们需要的那三个包
-          find openwrt/bin/packages -type f -name "quickfile-*.apk" -exec cp -v {} dist/apk/ \;
-          find openwrt/bin/packages -type f -name "luci-app-quickfile-*.apk" -exec cp -v {} dist/apk/ \;
-          find openwrt/bin/packages -type f -name "luci-i18n-quickfile-*.apk" -exec cp -v {} dist/apk/ \;
+          # 只在 OpenWrt 编译产物目录里寻找这三个特定前缀的包
+          find openwrt/bin/packages -type f \( \
+            -name "quickfile-*.apk" -o \
+            -name "luci-app-quickfile-*.apk" -o \
+            -name "luci-i18n-quickfile-*.apk" \
+          \) -exec cp -v {} dist/apk/ \;
           
-          echo "=> 最终收集到的文件:"
+          echo "=> 产物目录检查:"
           ls -lh dist/apk/
 
       - name: Upload Artifact
@@ -128,7 +129,6 @@ jobs:
       - name: Get Version
         id: get_version
         run: |
-          # 从收集到的 quickfile 包里提取版本号
           QF=$(ls dist/apk/quickfile-*.apk | head -1)
           VER=$(basename "$QF" | sed -E 's/^quickfile[-_]([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
           echo "VERSION=$VER" >> $GITHUB_ENV
@@ -138,7 +138,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         with:
           tag_name: v${{ env.VERSION }}-${{ github.event.inputs.arch }}
-          name: Quickfile v${{ env.VERSION }} (${{ github.event.inputs.arch }}) - APK
+          name: Quickfile v${{ env.VERSION }} (${{ github.event.inputs.arch }}) - 纯净包
           draft: false
           prerelease: false
           files: dist/apk/*.apk
